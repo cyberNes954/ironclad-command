@@ -1,0 +1,10 @@
+streamlit==1.39.0
+langchain==0.3.7
+langchain-groq==0.2.1
+langchain-community==0.3.7
+chromadb==0.5.18
+pymupdf==1.24.14
+youtube-transcript-api==0.6.3
+trafilatura==1.12.2
+python-dotenv==1.0.1
+requests==2.32.3
