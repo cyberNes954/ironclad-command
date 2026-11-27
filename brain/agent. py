@@ -1,93 +1,101 @@
 import os
+import json
+import urllib.request
+import urllib.error
 from pathlib import Path
-from dotenv import load_dotenv
-from groq import Groq
 
-load_dotenv()
 KB_ROOT = Path("knowledge_base")
+MAX_CHARS = 280000
 
 SYSTEM_PROMPT = """You are IRONCLAD COMMAND - master operations brain of Ironclad Logistic,
 a truck dispatch service in Fort Lauderdale, Florida (954) 634-2388.
 
-ROLE: Oversee all dispatch operations. Answer ONLY using the knowledge base below.
-Never guess. If the answer is not in the knowledge base, say:
+Answer ONLY from the knowledge base below. Never guess. If the answer is not there, say:
 "That is not in my knowledge base yet - upload the source."
 
 BUSINESS RULES:
 - No forced dispatch, ever. The carrier approves every load.
-- Rate negotiation must be backed by CPM math (break-even + 15-25% profit).
-- Every load needs a signed Rate Confirmation before dispatch. No RC = No Dispatch.
-- Detention claims: notify the broker within 15 minutes of detention starting.
-- POD sent to broker within 2 hours of delivery.
-- Verify carrier/broker legitimacy via SAFER before onboarding.
-- Dispatch fee = % of gross line-haul, invoiced weekly on Fridays.
+- Rates must be backed by CPM math (break-even + 15-25% profit).
+- No Rate Confirmation = No Dispatch.
+- Notify the broker within 15 minutes when detention starts.
+- Send POD to the broker within 2 hours of delivery.
+- Vet carriers on SAFER before onboarding. Unsatisfactory rating = do not use.
+- Dispatch fee = percent of gross line-haul, invoiced weekly on Friday.
 
-STYLE: Direct, professional, no fluff. Cite which document you are using.
-Flag risks and red flags immediately. Give actionable next steps.
+STYLE: Direct, professional, no fluff. Name the document you used. Flag risks immediately.
 
 KNOWLEDGE BASE:
 {context}"""
 
-# Safety cap so the request never exceeds the model's memory.
-# If your library grows past this, the brain auto-selects the most
-# relevant files instead of sending everything.
-MAX_CHARS = 280000
 
 class IroncladBrain:
     def __init__(self):
-        self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        self.api_key = os.environ.get("GROQ_API_KEY", "")
         self.files = []
-        self._load_knowledge()
+        self.rebuild_index()
 
-    def _load_knowledge(self):
+    def rebuild_index(self):
         self.files = []
-        for md in KB_ROOT.rglob("*.md"):
+        if not KB_ROOT.exists():
+            return
+        for md in sorted(KB_ROOT.rglob("*.md")):
             try:
                 text = md.read_text(encoding="utf-8", errors="ignore")
             except Exception:
                 continue
             self.files.append({
                 "name": md.name,
-                "category": md.parent.name,
-                "text": f"=== [{md.parent.name}] {md.name} ===\n{text}",
+                "text": "=== [%s] %s ===\n%s" % (md.parent.name, md.name, text),
             })
 
-    def rebuild_index(self):
-        self._load_knowledge()
-
-    def _select_context(self, question):
-        # If total text fits, send everything (best answers).
+    def _context(self, question):
         total = sum(len(f["text"]) for f in self.files)
         if total <= MAX_CHARS:
             return "\n\n".join(f["text"] for f in self.files)
-        # Otherwise pick files that share words with the question.
-        words = set(w.lower() for w in question.split() if len(w) > 3)
-        scored = []
-        for f in self.files:
-            low = f["text"].lower()
-            score = sum(1 for w in words if w in low)
-            scored.append((score, f))
-        scored.sort(key=lambda x: x[0], reverse=True)
-        chosen, size = [], 0
-        for score, f in scored:
+        words = {w.lower() for w in question.split() if len(w) > 3}
+        scored = sorted(
+            self.files,
+            key=lambda f: sum(1 for w in words if w in f["text"].lower()),
+            reverse=True,
+        )
+        out, size = [], 0
+        for f in scored:
             if size + len(f["text"]) > MAX_CHARS:
-                break
-            chosen.append(f["text"])
+                continue
+            out.append(f["text"])
             size += len(f["text"])
-        return "\n\n".join(chosen)
+        return "\n\n".join(out)
 
     def ask(self, question):
+        if not self.api_key:
+            return {"answer": "GROQ_API_KEY is missing. Add it in Streamlit Secrets.", "sources": []}
         if not self.files:
-            return {"answer": "Knowledge base is empty. Upload documents in the Teach Me tab first.", "sources": []}
-        context = self._select_context(question)
-        messages = [
-            {"role": "system", "content": SYSTEM_PROMPT.format(context=context)},
-            {"role": "user", "content": question},
-        ]
-        completion = self.client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=messages,
-            temperature=0.2,
-            max_tokens=1024,
+            return {"answer": "Knowledge base is empty. Upload documents in the Teach Me tab.", "sources": []}
+        payload = {
+            "model": "llama-3.3-70b-versatile",
+            "messages": [
+                {"role": "system", "content": SYSTEM_PROMPT.format(context=self._context(question))},
+                {"role": "user", "content": question},
+            ],
+            "temperature": 0.2,
+            "max_tokens": 1024,
+        }
+        req = urllib.request.Request(
+            "https://api.groq.com/openai/v1/chat/completions",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={
+                "Authorization": "Bearer " + self.api_key,
+                "Content-Type": "application/json",
+                "User-Agent": "IroncladCommand/1.0",
+            },
+            method="POST",
         )
-        return {"answer": completion.choices[0].message.content, "sources": []}
+        try:
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            return {"answer": data["choices"][0]["message"]["content"], "sources": []}
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", "ignore")[:500]
+            return {"answer": "Groq API error %s: %s" % (e.code, body), "sources": []}
+        except Exception as e:
+            return {"answer": "Request failed: %s" % e, "sources": []}
