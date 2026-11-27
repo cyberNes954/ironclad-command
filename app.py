@@ -1,13 +1,15 @@
-import os
-import streamlit as _st
-for _k in ("GROQ_API_KEY", "VAPI_API_KEY"):
-    try:
-        if _k in _st.secrets:
-            os.environ[_k] = str(_st.secrets[_k])
-    except Exception:
-        pass
-import streamlit as st
-from brain.agent import IroncladBrain
+1  import os
+2  import streamlit as _st
+3  for _k in ("GROQ_API_KEY", "VAPI_API_KEY"):
+4      try:
+5          if _k in _st.secrets:
+6              os.environ[_k] = str(_st.secrets[_k])
+7      except Exception:
+8          pass
+9  import streamlit as st
+10 from brain.agent import IroncladBrain    ← THIS LINE
+11 import json
+12 import urllib.request
 import json
 import urllib.request
 import urllib.error
