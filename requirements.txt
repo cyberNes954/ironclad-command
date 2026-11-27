@@ -1,5 +1,4 @@
 streamlit
-groq
 python-dotenv
 pymupdf
 youtube-transcript-api==0.6.3
