@@ -1,15 +1,5 @@
-1  import os
-2  import streamlit as _st
-3  for _k in ("GROQ_API_KEY", "VAPI_API_KEY"):
-4      try:
-5          if _k in _st.secrets:
-6              os.environ[_k] = str(_st.secrets[_k])
-7      except Exception:
-8          pass
-9  import streamlit as st
-10 from brain.agent import IroncladBrain    ← THIS LINE
-11 import json
-12 import urllib.request
+import os
+import re
 import json
 import urllib.request
 import urllib.error
@@ -19,57 +9,20 @@ import streamlit as st
 st.set_page_config(page_title="Ironclad Command", page_icon="🧠", layout="wide")
 
 
-def get_key(name):
+def key(n):
     try:
-        if name in st.secrets:
-            return str(st.secrets[name])
+        if n in st.secrets:
+            return str(st.secrets[n])
     except Exception:
         pass
-    return os.environ.get(name, "")
+    return os.environ.get(n, "")
 
 
-GROQ_KEY = get_key("GROQ_API_KEY")
-VAPI_KEY = get_key("VAPI_API_KEY")
-
-FLAGS = {}
-try:
-    import fitz
-    FLAGS["PDF upload"] = True
-except Exception:
-    FLAGS["PDF upload"] = False
-try:
-    from youtube_transcript_api import YouTubeTranscriptApi
-    FLAGS["YouTube"] = True
-except Exception:
-    FLAGS["YouTube"] = False
-try:
-    import trafilatura
-    FLAGS["Web articles"] = True
-except Exception:
-    FLAGS["Web articles"] = False
-try:
-    import requests
-    FLAGS["Cold calls"] = True
-except Exception:
-    FLAGS["Cold calls"] = False
-
-try:
-    from voice_agent.script import COLD_CALL_SYSTEM_PROMPT
-except Exception:
-    COLD_CALL_SYSTEM_PROMPT = (
-        "You are a professional dispatcher for Ironclad Logistic in Fort Lauderdale. "
-        "Follow the 80/20 rule: the carrier talks 80 percent, you talk 20. "
-        "Diagnose before you pitch. Ask equipment type, preferred lanes, how they get "
-        "loads now, their cost per mile, and their target rate. Confirm their email, "
-        "summarize their pain, then ask if it makes sense to take the next step. "
-        "Short natural sentences. Never monologue."
-    )
-
+GROQ = key("GROQ_API_KEY")
 KB = Path("knowledge_base")
 KB.mkdir(parents=True, exist_ok=True)
 CATS = ["01_acquisition", "02_onboarding", "03_equipment", "04_financial",
         "05_broker_relations", "06_vetting", "07_execution", "08_new"]
-MAX_CHARS = 280000
 
 SYSTEM = """You are IRONCLAD COMMAND - master operations brain of Ironclad Logistic,
 a truck dispatch service in Fort Lauderdale, Florida (954) 634-2388.
@@ -92,215 +45,141 @@ KNOWLEDGE BASE:
 {context}"""
 
 
-def slugify(t):
+def docs():
+    out = []
+    for p in sorted(KB.rglob("*.md")):
+        try:
+            out.append((p.name, p.read_text(encoding="utf-8", errors="ignore")))
+        except Exception:
+            pass
+    return out
+
+
+def slug(t):
     t = re.sub(r"[^\w\s-]", "", t.lower())
     return re.sub(r"[-\s]+", "-", t).strip("-")[:80] or "doc"
 
 
-def load_docs():
-    docs = []
-    for md in sorted(KB.rglob("*.md")):
-        try:
-            docs.append((md.name, md.read_text(encoding="utf-8", errors="ignore")))
-        except Exception:
-            pass
-    return docs
-
-
-def save_doc(title, body, cat):
+def save(title, body, cat):
     d = KB / cat
     d.mkdir(parents=True, exist_ok=True)
-    p = d / (slugify(title) + ".md")
+    p = d / (slug(title) + ".md")
     p.write_text("# " + title + "\n\n" + body, encoding="utf-8")
     return str(p)
 
 
-def build_context(question, docs):
-    blocks = ["=== %s ===\n%s" % (n, t) for n, t in docs]
-    if sum(len(b) for b in blocks) <= MAX_CHARS:
-        return "\n\n".join(blocks)
-    words = {w.lower() for w in question.split() if len(w) > 3}
-    ranked = sorted(blocks, key=lambda b: sum(1 for w in words if w in b.lower()), reverse=True)
-    out, size = [], 0
-    for b in ranked:
-        if size + len(b) > MAX_CHARS:
-            continue
-        out.append(b)
-        size += len(b)
-    return "\n\n".join(out)
-
-
-def ask_brain(question):
-    if not GROQ_KEY:
-        return "GROQ_API_KEY is missing. Add it in Streamlit Cloud, app Settings, Secrets."
-    docs = load_docs()
-    if not docs:
+def ask(q):
+    if not GROQ:
+        return "GROQ_API_KEY missing. Add it in Streamlit Cloud, Settings, Secrets."
+    ds = docs()
+    if not ds:
         return "Knowledge base is empty. Upload your PDFs in the Teach Me tab."
-    payload = {
+    ctx = "\n\n".join("=== %s ===\n%s" % (n, t) for n, t in ds)[:280000]
+    body = {
         "model": "llama-3.3-70b-versatile",
         "messages": [
-            {"role": "system", "content": SYSTEM.format(context=build_context(question, docs))},
-            {"role": "user", "content": question},
+            {"role": "system", "content": SYSTEM.format(context=ctx)},
+            {"role": "user", "content": q},
         ],
         "temperature": 0.2,
         "max_tokens": 1024,
     }
-    req = urllib.request.Request(
+    r = urllib.request.Request(
         "https://api.groq.com/openai/v1/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": "Bearer " + GROQ_KEY,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Authorization": "Bearer " + GROQ,
                  "Content-Type": "application/json",
                  "User-Agent": "IroncladCommand/1.0"},
         method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=90) as r:
-            data = json.loads(r.read().decode("utf-8"))
-        return data["choices"][0]["message"]["content"]
+        with urllib.request.urlopen(r, timeout=90) as resp:
+            return json.loads(resp.read().decode("utf-8"))["choices"][0]["message"]["content"]
     except urllib.error.HTTPError as e:
-        return "Groq error %s: %s" % (e.code, e.read().decode("utf-8", "ignore")[:400])
+        return "Groq error %s: %s" % (e.code, e.read().decode("utf-8", "ignore")[:300])
     except Exception as e:
-        return "Request failed: %s" % e
+        return "Failed: %s" % e
 
 
-def vapi(method, path, body=None):
-    r = requests.request(method, "https://api.vapi.ai" + path,
-                         headers={"Authorization": "Bearer " + VAPI_KEY,
-                                  "Content-Type": "application/json"},
-                         json=body, timeout=60)
-    r.raise_for_status()
-    return r.json()
-
-
-docs = load_docs()
+D = docs()
 st.sidebar.title("🧠 IRONCLAD COMMAND")
-st.sidebar.caption("Ironclad Logistic™")
-st.sidebar.metric("Knowledge Files", len(docs))
-st.sidebar.write("Groq key:", "✅" if GROQ_KEY else "❌")
-st.sidebar.write("Vapi key:", "✅" if VAPI_KEY else "❌")
+st.sidebar.caption("Ironclad Logistic")
+st.sidebar.metric("Knowledge Files", len(D))
+st.sidebar.write("Groq key:", "✅" if GROQ else "❌")
 
-tabs = st.tabs(["💬 Brain", "📚 Teach Me", "📞 Cold Calls", "🗂️ Knowledge", "🔧 System"])
+t1, t2, t3, t4 = st.tabs(["💬 Brain", "📚 Teach Me", "🗂️ Knowledge", "🔧 System"])
 
-with tabs[0]:
+with t1:
     st.header("Talk to Ironclad Command")
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
-    for m in st.session_state.messages:
+    if "msgs" not in st.session_state:
+        st.session_state.msgs = []
+    for m in st.session_state.msgs:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
     if q := st.chat_input("Ask about SOPs, rates, compliance..."):
-        st.session_state.messages.append({"role": "user", "content": q})
+        st.session_state.msgs.append({"role": "user", "content": q})
         with st.chat_message("user"):
             st.markdown(q)
         with st.chat_message("assistant"):
             with st.spinner("Thinking..."):
-                a = ask_brain(q)
+                a = ask(q)
             st.markdown(a)
-        st.session_state.messages.append({"role": "assistant", "content": a})
+        st.session_state.msgs.append({"role": "assistant", "content": a})
 
-with tabs[1]:
+with t2:
     st.header("Teach the Brain")
     cat = st.selectbox("Category", CATS)
     ups = st.file_uploader("Upload PDFs", type=["pdf", "txt", "md"], accept_multiple_files=True)
     if ups and st.button("Ingest", type="primary"):
+        import fitz
         for f in ups:
             raw = f.read()
             if f.name.lower().endswith(".pdf"):
-                if not FLAGS["PDF upload"]:
-                    st.error("PDF library not installed yet. Reboot the app.")
-                    continue
                 d = fitz.open(stream=raw, filetype="pdf")
                 text = "\n\n".join(p.get_text() for p in d)
                 d.close()
             else:
                 text = raw.decode("utf-8", "ignore")
-            st.success(save_doc(f.name, text, cat))
+            st.success(save(f.name, text, cat))
         st.rerun()
 
     url = st.text_input("YouTube or blog URL")
     if url and st.button("Learn from link", type="primary"):
         try:
             if "youtu" in url:
-                if not FLAGS["YouTube"]:
-                    st.error("YouTube library not installed yet. Reboot the app.")
+                from youtube_transcript_api import YouTubeTranscriptApi
+                vid = None
+                for pat in [r"v=([a-zA-Z0-9_-]{11})", r"youtu\.be/([a-zA-Z0-9_-]{11})"]:
+                    m = re.search(pat, url)
+                    if m:
+                        vid = m.group(1)
+                if not vid:
+                    st.error("Could not read that YouTube link.")
                 else:
-                    vid = None
-                    for p in [r"v=([a-zA-Z0-9_-]{11})", r"youtu\.be/([a-zA-Z0-9_-]{11})"]:
-                        m = re.search(p, url)
-                        if m:
-                            vid = m.group(1)
-                    if not vid:
-                        st.error("Could not read that YouTube link.")
-                    else:
-                        tr = YouTubeTranscriptApi.get_transcript(vid, languages=["en"])
-                        text = " ".join(e["text"] for e in tr)
-                        st.success(save_doc("yt-" + vid, "Source: " + url + "\n\n" + text, cat))
-                        st.rerun()
+                    tr = YouTubeTranscriptApi.get_transcript(vid, languages=["en"])
+                    st.success(save("yt-" + vid, "Source: " + url + "\n\n" + " ".join(e["text"] for e in tr), cat))
+                    st.rerun()
             else:
-                if not FLAGS["Web articles"]:
-                    st.error("Web library not installed yet. Reboot the app.")
+                import trafilatura
+                text = trafilatura.extract(trafilatura.fetch_url(url), include_comments=False)
+                if not text:
+                    st.error("Could not extract that page.")
                 else:
-                    text = trafilatura.extract(trafilatura.fetch_url(url), include_comments=False)
-                    if not text:
-                        st.error("Could not extract that page.")
-                    else:
-                        st.success(save_doc("web-" + url.split("//")[-1][:40], "Source: " + url + "\n\n" + text, cat))
-                        st.rerun()
+                    st.success(save("web-" + url.split("//")[-1][:40], "Source: " + url + "\n\n" + text, cat))
+                    st.rerun()
         except Exception as e:
             st.error(str(e))
 
-with tabs[2]:
-    st.header("Cold Call Agent")
-    if not FLAGS["Cold calls"]:
-        st.error("requests library not installed yet. Reboot the app.")
-    elif not VAPI_KEY:
-        st.error("VAPI_API_KEY missing. Add it in Streamlit Secrets.")
-    else:
-        act = st.radio("Action", ["Create Assistant", "Make a Call", "Call History"])
-        if act == "Create Assistant":
-            if st.button("Create", type="primary"):
-                try:
-                    r = vapi("POST", "/assistant", {
-                        "name": "Ironclad Cold Caller",
-                        "model": {"provider": "groq", "model": "llama-3.3-70b-versatile",
-                                  "systemPrompt": COLD_CALL_SYSTEM_PROMPT, "temperature": 0.3},
-                        "voice": {"provider": "11labs", "voiceId": "21m00Tcm4TlvDq8ikWAM"},
-                        "firstMessage": "Hi, is this the owner of the company? This is Sarah with Ironclad Logistic. Quick question, are you under a load right now or looking for one?",
-                        "endCallPhrases": ["goodbye", "bye", "have a good day"],
-                        "recordingEnabled": True,
-                    })
-                    st.session_state.aid = r["id"]
-                    st.code(r["id"])
-                except Exception as e:
-                    st.error(str(e))
-        elif act == "Make a Call":
-            aid = st.text_input("Assistant ID", st.session_state.get("aid", ""))
-            ph = st.text_input("Phone (+1XXXXXXXXXX)")
-            if st.button("MAKE CALL", type="primary"):
-                try:
-                    r = vapi("POST", "/call/phone", {"assistantId": aid, "customer": {"number": ph}})
-                    st.success(r.get("id", "started"))
-                except Exception as e:
-                    st.error(str(e))
-        else:
-            try:
-                for c in vapi("GET", "/call")[:10]:
-                    st.json(c)
-            except Exception as e:
-                st.error(str(e))
-
-with tabs[3]:
+with t3:
     st.header("Knowledge Base")
-    if not docs:
+    if not D:
         st.info("Nothing uploaded yet. Go to Teach Me.")
-    for n, t in docs:
-        with st.expander("%s  (%d chars)" % (n, len(t))):
+    for n, t in D:
+        with st.expander("%s (%d chars)" % (n, len(t))):
             st.text(t[:3000])
 
-with tabs[4]:
-    st.header("🔧 System Status")
-    st.write("Groq key detected:", bool(GROQ_KEY))
-    st.write("Vapi key detected:", bool(VAPI_KEY))
-    st.json(FLAGS)
-    st.write("knowledge_base contents:", sorted(p.name for p in KB.iterdir()))
+with t4:
+    st.header("🔧 System")
+    st.write("Groq key detected:", bool(GROQ))
+    st.write("Knowledge files:", len(D))
     st.write("Repo root:", sorted(os.listdir(".")))
