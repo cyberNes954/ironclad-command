@@ -12,7 +12,7 @@ st.set_page_config(page_title="Ironclad Command", page_icon="🧠", layout="wide
 def get_key(name):
     try:
         if name in st.secrets:
-            return str(st.secrets[name])
+            return str(st.secrets[name]).
     except Exception:
         pass
     return os.environ.get(name, "")
